@@ -1,0 +1,17 @@
+# Изоляция окружения и кэшей
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Конфигурация и базы данных (Security)
+core/config.json
+data/
+.vscode/
+*.db
+*.sqlite3
+.env
+
+# Артефакты ОС
+.DS_Store
+Thumbs.db

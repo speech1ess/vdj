@@ -1,0 +1,39 @@
+{
+  "config_version": "1.0",
+  "db_type": "postgresql",
+  "output_dir": "C:/Users/username/Documents/PLG/data",
+  "sql_scripts_dir": "C:/Users/username/Documents/PLG/sql",
+  "db_config": {
+    "host": "localhost",
+    "port": "5432",
+    "dbname": "PLG",
+    "user": "plg",
+    "password": "plg",
+    "ssl_mode": "prefer",
+    "connection_timeout": 30
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "C:/Users/username/Documents/PLG/logs/app.log",
+    "max_size_mb": 10,
+    "backup_count": 5,
+    "console_output": true
+  },
+  "ui": {
+    "theme": "light",
+    "language": "ru",
+    "font_size": 12,
+    "window_size": {
+      "width": 1024,
+      "height": 768
+    }
+  },
+  "scan": {
+    "analysis_duration": 30,
+    "threads": 4,
+    "file_types": [".mp3", ".wav", ".flac", ".ogg", ".m4a"],
+    "extract_bpm": true,
+    "extract_key": true,
+    "extract_genre": true
+  }
+}

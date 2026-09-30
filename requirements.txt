@@ -1,0 +1,15 @@
+# --- Audio & DSP (Цифровая обработка сигналов) ---
+librosa>=0.10.1      # CPU-bound математика (BPM, Тональность, Энергетика)
+mutagen>=1.47.0      # Быстрое чтение/запись ID3 и Vorbis Comments
+soundfile>=0.12.1    # Обязательная зависимость librosa для чтения FLAC/WAV
+
+# --- Database & ORM (Data-Driven слой) ---
+SQLAlchemy>=2.0.25   # Используем строго 2.0+ (современный синтаксис Mapped/mapped_column)
+psycopg2-binary>=2.9.9 # Драйвер для PostgreSQL (WSL2/Docker)
+
+# --- Network & I/O (Асинхронные походы в API) ---
+aiohttp>=3.9.3       # Быстрые неблокирующие запросы к Discogs/MusicBrainz
+
+# --- Dev Tools (Устранение технического долга) ---
+ruff>=0.3.0          # Статический анализ и форматирование (написан на Rust)
+mypy>=1.9.0          # Строгая типизация

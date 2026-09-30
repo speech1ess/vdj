@@ -1,0 +1,227 @@
+# core/services/tagmap.yaml
+
+UNIFIED_TAGS:
+  title:
+    - TIT2
+    - TITLE
+    - ©nam
+  artist:
+    - TPE1
+    - TPE2
+    - ARTIST
+    - ALBUMARTIST
+    - ©ART
+  album:
+    - TALB
+    - ALBUM
+    - ©alb
+  track_number:
+    - TRCK
+    - TRACKNUMBER
+    - trkn
+  tracktotal:
+    - TOTALTRACKS
+  disc_number:
+    - TPOS
+    - DISCNUMBER
+    - disk
+  disctotal:
+    - TOTALDISCS
+  genre:
+    - TCON
+    - GENRE
+    - ©gen
+  release_date:
+    - TDRC
+    - DATE
+    - TDOR
+    - ORIGINALDATE
+    - ©day
+  release_year:
+    - YEAR
+  composer:
+    - TCOM
+    - COMPOSER
+    - ©wrt
+  lyricist:
+    - TEXT
+    - LYRICIST
+  lyrics:
+    - USLT
+    - LYRICS
+  comment:
+    - COMM
+    - COMMENT
+    - ©cmt
+  language:
+    - TLAN
+    - LANGUAGE
+  encoded_by:
+    - TENC
+    - ENCODEDBY
+  encoder:
+    - TSSE
+    - ENCODER
+  bpm:
+    - TBPM
+    - BPM
+  media_type:
+    - TMED
+    - MEDIATYPE
+  file_type:
+    - TFLT
+    - FILETYPE
+  barcode:
+    - BARCODE
+    - TSRC
+    - ISRC
+  catalog_number:
+    - CATALOGNUMBER
+  grouping:
+    - TIT1
+    - GROUPING
+    - ©grp
+  subtitle:
+    - TIT3
+    - SUBTITLE
+  conductor:
+    - TPE3
+    - CONDUCTOR
+  remixer:
+    - TPE4
+    - REMIXER
+    - MIXARTIST
+  mood:
+    - TMOO
+    - MOOD
+  script:
+    - SCRIPT
+  performer:
+    - PERFORMER
+    - ©con
+  arranger:
+    - ARRANGER
+  producer:
+    - PRODUCER
+  engineer:
+    - ENGINEER
+  djmix:
+    - DJMIXER
+  label:
+    - LABEL
+    - TCOP
+    - COPYRIGHT
+    - ORGANIZATION
+    - ©cpy
+    - TPUB
+    - PUBLISHER
+    - ©pub
+  license:
+    - LICENSE
+  location:
+    - LOCATION
+    - RECORDINGLOCATION
+  album_gain:
+    - ALBUM_GAIN
+  track_gain:
+    - REPLAYGAIN_TRACK_GAIN
+  album_peak:
+    - REPLAYGAIN_ALBUM_PEAK
+  track_peak:
+    - REPLAYGAIN_TRACK_PEAK
+  rating:
+    - POPM
+    - RATING
+  cover_path: 
+    - cover_art
+    - APIC
+    - METADATA_BLOCK_PICTURE
+  chapters:
+    - CHAP
+  table_of_contents:
+    - CTOC
+  compilation:
+    - TCMP
+    - COMPILATION
+  website:
+    - WOAR
+    - WEBSITE
+  key:
+    - KEY
+    - INITIALKEY
+  duration:
+    - DURATION  # Технический, не всегда в тегах
+  bit_rate:
+    - BITRATE
+  sample_rate:
+    - SAMPLERATE
+  file_size:
+    - FILESIZE
+  hash:
+    - FILEHASH
+  channels:
+    - CHANNELS
+  bit_depth:
+    - BITDEPTH
+  dynamic_range:
+    - DYNAMICRANGE
+  energy_level:
+    - ENERGYLEVEL
+  cue_sheet_path:
+    - CUE_PATH
+
+MODELS_TO_TAG:
+  Artist:
+    name: artist
+
+  Track:
+    title: title
+    duration: duration  # Обычно длительность берётся из файла напрямую
+    bpm: bpm
+    key: key  # Не указан в UNIFIED_TAGS — можно добавить при необходимости
+    year: release_year
+    track_number: track_number
+    energy_level: energy_level  # Аналитика, не хранится в тегах
+    mood: mood
+    loudness: track_gain
+    dynamic_range: dynamic_range  # Нет соответствия
+
+  AudioFile:
+    file_path: file_path  # Извлекается извне, не из тегов
+    file_format: file_type
+    file_size: file_size  # Извлекается на уровне системы
+    bit_rate: bit_rate  # Тоже извлекается из файла
+    sample_rate: sample_rate  # Аналогично
+    hash: hash  # Внутреннее поле
+    channels: channels  # Не в тегах
+    bit_depth: bit_depth  # Аналогично
+    cue_sheet_path: cue_sheet_path  # Вне стандартных тегов
+
+  Genre:
+    name: genre
+
+  RecordLabel:
+    name: label
+    country: location
+
+  Album:
+    title: album
+    release_date: release_date
+    release_year: release_year
+    cover_path: cover_path
+    album_type: media_type  # Относительно, если указана категория
+    total_tracks: tracktotal
+    disc_count: disctotal
+    compilation: compilation
+    barcode: barcode
+
+CUE_TAGS:
+  performer: artist
+  title: title
+  album: album
+  albumartist: albumartist
+  genre: genre
+  date: release_date
+  track: track_number
+  index: index
+  isrc: barcode

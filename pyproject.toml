@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 150
+target-version = "py39" # Укажи свою версию Python
+
+[tool.ruff.lint]
+ignore = [
+    "UP007", # Игнорировать замену Union на |
+    "UP045"  # Игнорировать замену Optional на |
+]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort (сортировка импортов)
+    "B",  # flake8-bugbear (поиск багов и архитектурных костылей)
+    "UP", # pyupgrade (авто-апгрейд синтаксиса)
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
