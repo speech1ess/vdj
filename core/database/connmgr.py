@@ -1,8 +1,6 @@
-# core/database/connmgr.py
-
 import logging
 import sqlite3
-import traceback  # Добавляем импорт
+import traceback
 from contextlib import contextmanager
 
 import psycopg2
@@ -17,6 +15,7 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     """
     Менеджер соединений с базами данных.
+    Реализует паттерн Fail-Fast для предотвращения блокировки UI (Event Loop Starvation).
     """
 
     def __init__(self, configurator: Configurator):
@@ -28,17 +27,26 @@ class ConnectionManager:
         self._setup_engine()
 
     def _setup_engine(self):
-        """Настраивает SQLAlchemy engine на основе конфигурации."""
+        """Настраивает SQLAlchemy engine на основе конфигурации с Fail-Fast таймаутами."""
         db_type = self.configurator.db_type
         db_config = self.configurator.db_config
+
+        if db_type == "csv":
+            # Graceful Degradation: отключаем ORM-движок, не роняя приложение
+            logger.info("ℹ️ База данных отключена (Режим CSV). SQLAlchemy Engine не инициализируется.")
+            self.engine = None
+            self.Session = None
+            return
 
         if db_type == "sqlite":
             db_path = db_config.get("db_path", "data/playlist_ai.db")
             self.engine = create_engine(f"sqlite:///{db_path}")
         elif db_type == "postgresql":
+            # Внедрен connect_timeout=2, чтобы упавший сервер не блокировал UI на 30 секунд
             self.engine = create_engine(
                 f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}",
                 pool_pre_ping=True,
+                connect_args={"connect_timeout": 2},
             )
         else:
             raise ValueError(f"Неизвестный тип базы данных: {db_type}")
@@ -53,7 +61,10 @@ class ConnectionManager:
                 self.connection = sqlite3.connect(self.configurator.db_config["db_path"])
                 logger.info("✅ Подключение к SQLite успешно")
             elif self.configurator.db_type == "postgresql":
-                self.connection = psycopg2.connect(**self.configurator.db_config)
+                # Копируем конфиг, чтобы не мутировать исходный, и добавляем Fail-Fast
+                pg_config = self.configurator.db_config.copy()
+                pg_config["connect_timeout"] = 2
+                self.connection = psycopg2.connect(**pg_config)
                 logger.info("✅ Подключение к PostgreSQL успешно")
             return True
         except Exception as e:
@@ -84,28 +95,27 @@ class ConnectionManager:
             return self.Session()
         raise NotImplementedError("Сессия недоступна для данного типа БД")
 
+    def check_connection(self) -> bool:
+        """Health Check базы данных. Ограничен таймаутом движка."""
+        if self.configurator.db_type == "csv":
+            return True
+
+        if not self.engine:
+            return False
+
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return True
+        except Exception as e:
+            logger.debug(f"Health check failed (latency/connection issue): {e}")
+            return False
+
     def __getattr__(self, name):
         """Ловим вызов несуществующих методов и логируем стек вызовов."""
         logger.error(f"Попытка вызвать несуществующий метод: {name}")
         logger.error("Полный стек вызовов:\n" + "".join(traceback.format_stack()))
         raise AttributeError(f"'ConnectionManager' object has no attribute '{name}'")
-
-
-def check_connection(configurator: Configurator):
-    """Проверяет, работает ли подключение к БД."""
-    try:
-        engine = create_engine(
-            f"sqlite:///{configurator.db_config['db_path']}"
-            if configurator.db_type == "sqlite"
-            else f"postgresql://{configurator.db_config['user']}:{configurator.db_config['password']}@"
-            f"{configurator.db_config['host']}:{configurator.db_config['port']}/{configurator.db_config['dbname']}"
-        )
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки соединения: {e}")
-        return False
 
 
 @contextmanager

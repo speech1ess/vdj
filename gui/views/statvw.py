@@ -8,13 +8,13 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from core.viewmodels.statvwm import StatisticsViewModel
 from gui.views.basevw import BaseView
 
 
 class StatisticsView(BaseView):
-    def __init__(self, root, parent, viewmodel: StatisticsViewModel, log_callback=None):
-        super().__init__(root=root, parent=parent, viewmodel=viewmodel, log_callback=log_callback)
+    def __init__(self, root, parent, viewmodel, status_callback=None, **kwargs):
+        super().__init__(root=root, parent=parent, viewmodel=viewmodel, status_callback=status_callback, **kwargs)
+        self.status_callback = status_callback
         # Храним ссылки на графики для ручной очистки памяти (Garbage Collection)
         self._figures = []
         self.create_view()
@@ -140,9 +140,7 @@ class StatisticsView(BaseView):
         self.frame = ttk.Frame(self.content_frame, padding=20)
         self.frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(
-            self.frame, text="Добро пожаловать в Playlist AI", font=("Arial", 24, "bold")
-        ).pack(pady=20)
+        ttk.Label(self.frame, text="Добро пожаловать в Playlist AI", font=("Arial", 24, "bold")).pack(pady=20)
 
         description = """
         Playlist AI — это инструмент для создания персонализированных музыкальных плейлистов.
@@ -157,17 +155,11 @@ class StatisticsView(BaseView):
         actions_frame = ttk.LabelFrame(self.frame, text="Быстрые действия", padding=10)
         actions_frame.pack(fill=tk.X, pady=20)
 
-        ttk.Button(actions_frame, text="Сканировать аудиофайлы", command=self.on_scan_click).pack(
-            side=tk.LEFT, padx=10, pady=10
-        )
+        ttk.Button(actions_frame, text="Сканировать аудиофайлы", command=self.on_scan_click).pack(side=tk.LEFT, padx=10, pady=10)
 
-        ttk.Button(
-            actions_frame, text="Управление плейлистами", command=self.on_playlists_click
-        ).pack(side=tk.LEFT, padx=10, pady=10)
+        ttk.Button(actions_frame, text="Управление плейлистами", command=self.on_playlists_click).pack(side=tk.LEFT, padx=10, pady=10)
 
-        ttk.Button(actions_frame, text="Настройки", command=self.on_settings_click).pack(
-            side=tk.LEFT, padx=10, pady=10
-        )
+        ttk.Button(actions_frame, text="Настройки", command=self.on_settings_click).pack(side=tk.LEFT, padx=10, pady=10)
 
     def on_scan_click(self):
         """Обработчик нажатия кнопки 'Сканировать аудиофайлы'."""
@@ -209,9 +201,7 @@ class StatisticsView(BaseView):
         self.frame = ttk.Frame(self.content_frame, padding=10)
         self.frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 10))
 
-        ttk.Label(self.frame, text="Статистика", font=("Arial", 16, "bold")).pack(
-            pady=10, anchor="w"
-        )
+        ttk.Label(self.frame, text="Статистика", font=("Arial", 16, "bold")).pack(pady=10, anchor="w")
 
         top_frame = ttk.Frame(self.frame)
         top_frame.pack(fill=tk.X, pady=10)
@@ -226,9 +216,7 @@ class StatisticsView(BaseView):
         db_status_frame = ttk.Frame(left_frame)
         db_status_frame.pack(fill=tk.X, pady=5, anchor="w")
 
-        ttk.Label(db_status_frame, text="Статус БД:", font=("Arial", 12)).pack(
-            side=tk.LEFT, padx=(0, 10)
-        )
+        ttk.Label(db_status_frame, text="Статус БД:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0, 10))
 
         db_status_canvas = tk.Canvas(db_status_frame, width=15, height=15, highlightthickness=0)
         db_status_canvas.pack(side=tk.LEFT)
@@ -243,27 +231,13 @@ class StatisticsView(BaseView):
         stats_frame = ttk.LabelFrame(left_frame, text="Медиатека")
         stats_frame.pack(fill=tk.X, pady=10, anchor="w")
 
-        ttk.Label(stats_frame, text=f"Размер медиатеки: {totals.get('total_size', '0 Б')}").pack(
-            anchor="w", padx=10, pady=2
-        )
-        ttk.Label(
-            stats_frame, text=f"Общая длительность: {totals.get('total_duration', '0:00:00')}"
-        ).pack(anchor="w", padx=10, pady=2)
-        ttk.Label(stats_frame, text=f"Всего артистов: {totals.get('total_artists', 0)}").pack(
-            anchor="w", padx=10, pady=2
-        )
-        ttk.Label(stats_frame, text=f"Всего жанров: {totals.get('total_genres', 0)}").pack(
-            anchor="w", padx=10, pady=2
-        )
-        ttk.Label(stats_frame, text=f"Всего альбомов: {totals.get('total_albums', 0)}").pack(
-            anchor="w", padx=10, pady=2
-        )
-        ttk.Label(stats_frame, text=f"Всего треков: {totals.get('total_tracks', 0)}").pack(
-            anchor="w", padx=10, pady=2
-        )
-        ttk.Label(stats_frame, text=f"Всего плейлистов: {totals.get('total_playlists', 0)}").pack(
-            anchor="w", padx=10, pady=2
-        )
+        ttk.Label(stats_frame, text=f"Размер медиатеки: {totals.get('total_size', '0 Б')}").pack(anchor="w", padx=10, pady=2)
+        ttk.Label(stats_frame, text=f"Общая длительность: {totals.get('total_duration', '0:00:00')}").pack(anchor="w", padx=10, pady=2)
+        ttk.Label(stats_frame, text=f"Всего артистов: {totals.get('total_artists', 0)}").pack(anchor="w", padx=10, pady=2)
+        ttk.Label(stats_frame, text=f"Всего жанров: {totals.get('total_genres', 0)}").pack(anchor="w", padx=10, pady=2)
+        ttk.Label(stats_frame, text=f"Всего альбомов: {totals.get('total_albums', 0)}").pack(anchor="w", padx=10, pady=2)
+        ttk.Label(stats_frame, text=f"Всего треков: {totals.get('total_tracks', 0)}").pack(anchor="w", padx=10, pady=2)
+        ttk.Label(stats_frame, text=f"Всего плейлистов: {totals.get('total_playlists', 0)}").pack(anchor="w", padx=10, pady=2)
 
         if bpm_values:
             self.create_bpm_density_chart(right_frame, bpm_values)

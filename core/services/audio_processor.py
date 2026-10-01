@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
-import librosa
 import pytz
-import soundfile as sf  # Используем C-библиотеку для мгновенного чтения заголовков
+
+# ГАРАНТИЯ ПОТОКОБЕЗОПАСНОСТИ (Thread-Safe IPC):
+# Жестко глушим OpenMP и LLVM до 1 потока на уровне МОДУЛЯ.
+# Это гарантирует, что ни одна импортированная C-библиотека (ни soundfile, ни librosa)
+# не поднимет пул потоков при форке/спавне процесса.
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["NUMBA_NUM_THREADS"] = "1"
+
 
 from core.models import Album, Artist, AudioFile, Genre, Track
 from core.models.enums import AudioFormat, MusicalKey
@@ -18,7 +29,8 @@ from core.services.metadata_extractor import CueParser, MetadataExtractor
 class AudioProcessor:
     """
     Высокопроизводительный процессор для анализа аудиофайлов и CUE-сплиттинга.
-    Оптимизирован для минимизации I/O, защиты от OOM и работы в multiprocessing.
+    Использует Lazy Initialization для защиты от Segfault в ProcessPoolExecutor
+    и минимизирует CPU overhead за счет Data-Driven конвейера.
     """
 
     AUDIO_EXTENSIONS = {fmt.value for fmt in AudioFormat}
@@ -58,38 +70,96 @@ class AudioProcessor:
 
     def _analyze_bpm_key(self, file_path: str, offset: float = 0.0) -> Optional[tuple[float, Optional[str]]]:
         """
-        Извлекает BPM и тональность через librosa
-        с Lazy Offset Loading (без загрузки всего файла).
+        Изолированный DSP-анализ (Sandboxed Fallback).
+        Инкапсулирует вызов librosa в независимый процесс ОС с уникальным JIT-кэшем
+        для предотвращения коллизий компилятора Numba в Windows.
         """
+        import json
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+        import uuid
+        from pathlib import Path
+
+        # Генерируем уникальную директорию кэша для 100% изоляции JIT Numba
+        unique_cache = Path(tempfile.gettempdir()) / f"numba_cache_{uuid.uuid4().hex}"
+        unique_cache.mkdir(parents=True, exist_ok=True)
+
+        script_code = f"""
+import sys, json, warnings, os
+warnings.simplefilter('ignore')
+
+# Тотальная изоляция C-контекста
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['NUMBA_NUM_THREADS'] = '1'
+os.environ['NUMBA_CACHE_DIR'] = r'{str(unique_cache)}'
+os.environ['NUMBA_UPDATE_CACHE'] = '0'  # Запрещаем конкурентную перезапись
+
+try:
+    import librosa
+    import numpy as np
+
+    file_path = sys.argv[1]
+    y, sr = librosa.load(file_path, sr=22050, mono=True, offset={offset}, duration={self.duration})
+
+    # Защита от битых кадров и деления на ноль (Numba Segfault Protection)
+    y = np.nan_to_num(y.astype(np.float32))
+
+    if np.max(np.abs(y)) < 1e-4:
+        # Трек состоит из тишины (часто бывает в экспериментальной или битой FLAC музыке)
+        print(json.dumps({{"bpm": 0.0, "key_idx": -1}}))
+        sys.exit(0)
+
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    bpm = round(float(tempo[0] if isinstance(tempo, (list, tuple)) or hasattr(tempo, 'shape') else tempo), 1)
+
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    key_idx = int(chroma.mean(axis=1).argmax())
+
+    print(json.dumps({{"bpm": bpm, "key_idx": key_idx}}))
+except Exception as e:
+    # Прокидываем Python exception в stderr для перехвата оркестратором
+    print(f"SANDBOX_ERR: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
         try:
-            # Сводим в моно и делаем ресэмпл до 22050Hz для ускорения CQT-преобразования
-            y, sr = librosa.load(file_path, sr=22050, mono=True, offset=offset, duration=self.duration)
+            result = subprocess.run([sys.executable, "-c", script_code, file_path], capture_output=True, text=True, timeout=25)
 
-            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-            bpm = round(
-                float(tempo[0] if isinstance(tempo, (list, tuple)) or hasattr(tempo, "shape") else tempo),
-                1,
-            )
+            if result.returncode != 0 or not result.stdout.strip():
+                err_msg = result.stderr.strip() if result.stderr else "Нативный LLVM Segfault"
+                self.logger.warning(f"⚠️ Сбой DSP для {Path(file_path).name}: {err_msg}")
+                return None, None
 
-            chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-            chroma_sum = chroma.mean(axis=1)
-            key_idx = chroma_sum.argmax()
+            data = json.loads(result.stdout.strip())
 
-            key = self.key_order[key_idx].value if 0 <= key_idx < len(self.key_order) else None
+            if data["key_idx"] == -1:
+                self.logger.debug(f"Тишина обнаружена в {Path(file_path).name}, DSP пропущен.")
+                return 0.0, None
 
-            return bpm, key
-        except Exception as e:
-            self.logger.warning(f"Ошибка анализа BPM/Key (librosa) для {file_path} (offset={offset}): {e}")
+            key = self.key_order[data["key_idx"]].value if 0 <= data["key_idx"] < len(self.key_order) else None
+            return data["bpm"], key
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"⏳ DSP-анализ превысил таймаут для {Path(file_path).name}")
             return None, None
+        except Exception as e:
+            self.logger.error(f"Ошибка изоляции: {e}")
+            return None, None
+        finally:
+            # Уничтожаем следы песочницы
+            shutil.rmtree(unique_cache, ignore_errors=True)
 
     def _analyze_audio_properties(
         self, file_path: str, file_size: int, duration: float
     ) -> Optional[tuple[Optional[int], Optional[int], Optional[int], Optional[int]]]:
         """
-        Мгновенное извлечение технических параметров
-        напрямую из заголовков аудиофайла (O(1) Memory).
+        Мгновенное извлечение технических параметров.
+        Использует Lazy Import soundfile для защиты от краша пула процессов.
         """
         try:
+            import soundfile as sf
+
             info = sf.info(file_path)
             channels = info.channels
             sample_rate = info.samplerate
@@ -107,7 +177,7 @@ class AudioProcessor:
             return bit_rate, channels, bit_depth, sample_rate
 
         except Exception as e:
-            self.logger.warning(f"Ошибка чтения заголовков для {file_path}: {e}")
+            self.logger.debug(f"Ошибка чтения заголовков (soundfile) для {file_path}: {e}")
             return None, None, None, None
 
     def _find_cover_image(self, directory: Path) -> Optional[str]:
@@ -200,8 +270,7 @@ class AudioProcessor:
             next_start_time = track_data[i + 1]["start_time"] if i + 1 < len(track_data) else None
             track_duration = (next_start_time - start_time) if next_start_time is not None else (duration - start_time)
 
-            # Для каждого трека в миксе вычисляем только гармонику/ритм!
-            # (Никаких повторных чтений заголовков)
+            # Для мультитреков всегда используем librosa, так как теги общие для всего файла
             track_bpm, track_key = self._analyze_bpm_key(str(file), offset=start_time)
 
             track_dict = {
@@ -215,7 +284,7 @@ class AudioProcessor:
             }
 
             track = Track.from_dict(track_dict)
-            track.audiofile = audio_file  # Имя поля должно совпадать с relationship (audiofile, не audio_file)
+            track.audiofile = audio_file
 
             artist_names = Artist.normalize_artist_names(cue_track.get("performer") or norm_metadata["artist"])
             track.artists = [Artist(name=name) for name in artist_names if name]
@@ -280,6 +349,38 @@ class AudioProcessor:
                 self.logger.error(f"Ошибка парсинга .cue для {file}: {e}")
         return None
 
+    def extract_unified_metadata(self, file_path: Path) -> dict:
+        """
+        [STRICT I/O BOUND]
+        Извлекает сырые теги и технические параметры.
+        ЗАПРЕЩЕНЫ любые вызовы тяжелой математики (DSP) на этом этапе.
+        """
+        metadata = self.metadata_extractor.extract(str(file_path))
+        file_size = file_path.stat().st_size
+        duration = metadata.get("duration", 0.0)
+
+        # Легкий I/O (чтение заголовков через libsndfile)
+        br, ch, bd, sr = self._analyze_audio_properties(str(file_path), file_size, duration)
+
+        # Достаем то, что есть в тегах. Если пусто - оставляем как есть.
+        bpm = metadata.get("bpm")
+        key = metadata.get("key")
+
+        metadata.update(
+            {
+                "file_path": str(file_path),
+                "file_size": file_size,
+                "file_format": file_path.suffix.upper().lstrip("."),
+                "bit_rate": br,
+                "channels": ch,
+                "bit_depth": bd,
+                "sample_rate": sr,
+                "bpm": bpm,
+                "key": key,
+            }
+        )
+        return metadata
+
     def process_audio_file(
         self,
         file: Path,
@@ -302,15 +403,16 @@ class AudioProcessor:
 
         cue_metadata = self._extract_cue_metadata(file) if contains_multiple_tracks else None
 
-        # 1. Читаем технические заголовки ОДИН раз для всего файла
         bit_rate, channels, bit_depth, sample_rate = self._analyze_audio_properties(str(file), file_size, duration)
 
-        # 2. Если это сингл, вычисляем BPM/Key файла целиком
-        bpm, key = (None, None)
-        if not contains_multiple_tracks:
-            bpm, key = self._analyze_bpm_key(str(file))
+        bpm = metadata.get("bpm")
+        key = metadata.get("key")
 
-        # 3. Собираем объект физического файла
+        if not contains_multiple_tracks and (not bpm or not key):
+            calc_bpm, calc_key = self._analyze_bpm_key(str(file))
+            bpm = bpm or calc_bpm
+            key = key or calc_key
+
         audio_file = self.create_audio_file(
             file,
             file_size,
@@ -327,13 +429,12 @@ class AudioProcessor:
         if disc_number:
             norm_metadata["disc_num"] = disc_number
 
-        # 4. Сплиттинг CUE (если мультитрек) или сингл
         if contains_multiple_tracks:
-            tracks_with_order = self._create_multi_tracks(audio_file, track_data, file, duration, norm_metadata, cover_path)
+            tracks_with_order = self._create_multi_tracks(audio_file, track_data, file, duration, norm_metadata, cover_path)  # type: ignore
         else:
             tracks_with_order = self._create_single_track(
                 audio_file,
-                track_data,
+                track_data,  # type: ignore
                 metadata,
                 file,
                 duration,

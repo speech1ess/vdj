@@ -73,7 +73,10 @@ class CacheManager:
         artists = []
         artist_names = data.get("name", [])
 
-        if not isinstance(artist_names, (list, tuple)):
+        # Нормализация типов: если пришла строка, превращаем в список
+        if isinstance(artist_names, str):
+            artist_names = [n.strip() for n in artist_names.replace(";", ",").split(",") if n.strip()]
+        elif not isinstance(artist_names, (list, tuple)):
             return artists
 
         for name in artist_names:
@@ -248,7 +251,11 @@ class ObjFactory:
     def create_genre(self, metadata: dict[str, Any]) -> list[Genre]:
         genre_names = metadata.get("genre", [])
         genres = []
-        if not isinstance(genre_names, (list, tuple)):
+
+        # Нормализация типов
+        if isinstance(genre_names, str):
+            genre_names = [g.strip() for g in genre_names.replace(";", ",").split(",") if g.strip()]
+        elif not isinstance(genre_names, (list, tuple)):
             return genres
 
         for name in genre_names:
@@ -314,10 +321,18 @@ class ObjFactory:
         track = self.create_track(metadata, disc_number, track_number, audiofile) if "Track" in models_found else None
 
         # Сборка графа связей
-        if track and audiofile:
-            self.cache.add_track_audiofile(track, audiofile)
-        if track and album:
-            self.cache.add_track_album(track, album, disc_number, track_number)
+        if track:
+            # 1. ПРИВЯЗКА IN-MEMORY (Критично для работы UI без БД)
+            track.audiofile = audiofile
+            track.albums = [album] if album else []
+            track.artists = artists
+            track.genres = genres
+
+            # 2. Сборка связующих объектов для БД (CacheManager M2M)
+            if audiofile:
+                self.cache.add_track_audiofile(track, audiofile)
+            if album:
+                self.cache.add_track_album(track, album, disc_number, track_number)
             for genre in genres:
                 self.cache.add_track_genre(track, genre)
             for artist in artists:

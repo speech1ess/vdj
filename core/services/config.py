@@ -14,6 +14,12 @@ from typing import Any, Optional
 
 from core.services.logging import get_logger
 
+# Вычисляем корень проекта динамически (защита от смены CWD)
+# __file__ указывает на core/services/config.py
+# .parent = services, .parent.parent = core, .parent.parent.parent = vdj
+CORE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = CORE_DIR.parent
+
 
 class Configurator:
     """
@@ -21,10 +27,13 @@ class Configurator:
     и валидации параметров.
     """
 
-    DEFAULT_DB_TYPE = "csv"
-    DEFAULT_OUTPUT_DIR = "./data"
-    DEFAULT_SQL_SCRIPTS_DIR = "./data/sql"
-    DEFAULT_CONFIG_FILE = "./core/config.json"
+    # ИСПРАВЛЕНИЕ 1: Валидный SQL-драйвер по умолчанию
+    DEFAULT_DB_TYPE = "sqlite"
+
+    # ИСПРАВЛЕНИЕ 2: Строгие абсолютные пути
+    DEFAULT_OUTPUT_DIR = str(PROJECT_ROOT / "data")
+    DEFAULT_SQL_SCRIPTS_DIR = str(PROJECT_ROOT / "data" / "sql")
+    DEFAULT_CONFIG_FILE = str(CORE_DIR / "config.json")
 
     DB_TYPES = {
         "csv": "CSV - файл.",
@@ -46,7 +55,8 @@ class Configurator:
             "user": "plg",
             "password": "plg",
         },
-        "sqlite": {"db_path": "./data/database.db", "timeout": 20},
+        # Абсолютный путь к дефолтной БД
+        "sqlite": {"db_path": str(PROJECT_ROOT / "data" / "database.db"), "timeout": 20},
         "csv": {"delimiter": ",", "encoding": "utf-8", "quotechar": '"'},
     }
 

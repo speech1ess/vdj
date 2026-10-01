@@ -132,7 +132,7 @@ def set_log_level(level: int | str, logger_name: Optional[str] = None) -> None:
 
 
 def create_daily_rotating_file_handler(
-    log_dir: str | Path, base_filename: str, formatter: logging.Optional[Formatter] = None
+    log_dir: str | Path, base_filename: str, formatter: Optional[logging.Formatter] = None
 ) -> TimedRotatingFileHandler:
     """Фабрика для обработчика с ежедневной ротацией."""
     log_dir_path = Path(log_dir)

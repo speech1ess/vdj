@@ -4,8 +4,6 @@ from typing import Optional
 
 from core.models.artist import Artist
 from core.models.genre import Genre
-from core.repositories.audiofile_rep import AudioFileRepository
-from core.repositories.metadata_rep import MetadataRepository
 from core.repositories.track_rep import TrackRepository
 from core.services.config import Configurator
 from core.viewmodels.basevwm import BaseViewModel
@@ -16,9 +14,7 @@ class ManagerViewModel(BaseViewModel):
 
     def __init__(self, configurator: Configurator, log_callback: Optional[callable] = None):
         super().__init__(configurator=configurator, log_callback=log_callback)
-        metadata_repo = MetadataRepository(self.configurator)
-        audiofile_repo = AudioFileRepository(self.configurator)
-        self.track_repo = TrackRepository(self.configurator, metadata_repo, audiofile_repo)
+        self.track_repo = TrackRepository(self.configurator)
 
     def format_duration(self, seconds: int) -> str:
         """Форматирует секунды в mm:ss (перенесено из слоя репозиториев для чистоты)."""

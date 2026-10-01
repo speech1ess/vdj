@@ -1,102 +1,95 @@
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Event
-from typing import Optional, Union
+from typing import Optional
 
-from core.models.audiofile import AudioFile
 from core.models.enums import AudioFormat
-from core.models.track import Track
 from core.services.audio_processor import AudioProcessor
-from core.services.cache import CacheManager, ObjFactory
 from core.services.logging import get_logger
+from core.services.metadata_extractor import CueParser  # Импортируем CueParser напрямую
 from core.services.metadata_tools import MetadataNormalizer, MetadataValidator
-
-
-def _worker_process_file(file_path: Path, track_data: Optional[list[dict]] = None) -> Union[tuple[Path, Optional[dict], list[dict]], str, None]:
-    """
-    Изолированная функция для ProcessPool.
-    Выполняет тяжелый I/O (чтение заголовков) и CPU (librosa) анализ вне главного потока.
-    Возвращает сырые словари, которые легко сериализуются (Pickle) между процессами.
-    """
-    processor = AudioProcessor()
-    normalizer = MetadataNormalizer()
-    validator = MetadataValidator()
-
-    try:
-        # Извлечение
-        if track_data and len(track_data) > 1:
-            # Мультитрек (CUE)
-            # Внимание: для мультитрека мы передаем track_data в AudioProcessor
-            audio_file_dto, track_dtos = processor.process_audio_file(file_path, track_data, contains_multiple_tracks=True)
-            # Сериализуем обратно в словари для IPC передачи
-            return (
-                file_path,
-                vars(audio_file_dto) if audio_file_dto else None,
-                [vars(t) for t in track_dtos],
-                "ok",
-            )
-
-        else:
-            # Сингл файл
-            metadata = processor.extract_unified_metadata(file_path)
-
-            # Валидация
-            models_found, errors = validator.validate(metadata, file_path)
-            if not models_found:
-                return file_path, None, None, f"Skip: {errors}"
-
-            # Нормализация
-            norm_metadata = normalizer.normalize(metadata, file_path)
-
-            # Упаковываем метаданные и список найденных моделей
-            norm_metadata["_models_found"] = models_found
-            return file_path, norm_metadata, None, "ok"
-
-    except Exception as e:
-        return file_path, None, None, f"Error: {e}"
 
 
 class ScannerService:
     """
-    Высокопроизводительный сервис сканирования файловой системы.
-    Использует ProcessPoolExecutor для обхода GIL и утилизации всех ядер CPU.
+    Высокопроизводительный I/O-оркестратор (Stage 1: Fast Ingestion).
+    Использует ThreadPoolExecutor, так как чтение тегов освобождает GIL (syscalls).
+    Возвращает сырые DTO для размещения в Staging Area (RAM) перед валидацией.
     """
 
     AUDIO_EXTENSIONS = {fmt.value for fmt in AudioFormat}
 
-    def __init__(self, cue_analyze: bool = True, stop_event: Optional[Event] = None, max_workers: int = 4):
+    def __init__(self, cue_analyze: bool = True, stop_event: Optional[Event] = None, max_workers: int = 8):
         self.logger = get_logger("PlaylistAI.ScannerService")
         self.cue_analyze = cue_analyze
         self.stop_event = stop_event or Event()
+
+        # Для I/O Bound задач количество потоков может превышать число ядер (N*2)
         self.max_workers = max_workers
 
-        # Объекты, работающие только в главном процессе
-        self.processor = AudioProcessor()  # Для парсинга CUE в главном потоке
-        self.cache_manager = CacheManager()
-        self.obj_factory = ObjFactory(self.cache_manager)
+        # Инстанцируем Thread-Safe компоненты в главном потоке
+        self.processor = AudioProcessor()
+        self.normalizer = MetadataNormalizer()
+        self.validator = MetadataValidator()
+        self.cue_parser = CueParser()  # Инициализируем парсер
 
         self.progress_callback = None
         self.completion_callback = None
-        self.logger.info(f"ScannerService готов. Ядра (workers): {self.max_workers}")
+        self.logger.info(f"ScannerService I/O готов. Потоков (threads): {self.max_workers}")
 
     def set_callbacks(self, progress_callback: Optional[Callable], completion_callback: Optional[Callable]) -> None:
         self.progress_callback = progress_callback
         self.completion_callback = completion_callback
 
+    def _worker_extract_tags(self, file_path: Path, is_multi: bool = False) -> tuple[Path, Optional[dict], str]:
+        """
+        Изолированная I/O задача.
+        Извлекает теги, нормализует и возвращает плоский DTO-словарь.
+        """
+        if self.stop_event.is_set():
+            return file_path, None, "stopped"
+
+        try:
+            # 1. Syscall I/O (Освобождает GIL)
+            metadata = self.processor.extract_unified_metadata(file_path)
+
+            # 2. Быстрая CPU-валидация
+            models_found, errors = self.validator.validate(metadata, file_path)
+            if not models_found:
+                return file_path, None, f"Skip: {errors}"
+
+            # 3. Нормализация
+            norm_metadata = self.normalizer.normalize(metadata, file_path)
+
+            # 4. Сливаем данные: технические параметры (ID3) + чистые теги
+            metadata.update(norm_metadata)
+            metadata["_models_found"] = models_found
+            metadata["_is_multi"] = is_multi
+
+            return file_path, metadata, "ok"
+
+        except ValueError as ve:
+            return file_path, None, f"Unpack Error: {ve}"
+        except Exception as e:
+            return file_path, None, f"Error: {e}"
+
     def _collect_cue(self, directory: Path) -> dict[Path, list[dict]]:
-        """Ищет CUE файлы и парсит их структуру (легковесная задача, главный поток)."""
+        """Ищет CUE файлы и парсит их структуру."""
         if not self.cue_analyze:
             return {}
 
         cue_data = {}
         for cue_file in directory.rglob("*.cue"):
+            if not cue_file.is_file():
+                continue
+
             try:
-                tracks, _, _, _, _ = self.processor.cue_parser.parse_cue(cue_file)
+                # Используем правильно инициализированный парсер
+                tracks, _, _, _, _ = self.cue_parser.parse_cue(cue_file)
                 if not tracks:
                     continue
 
-                # Группируем треки по физическим аудиофайлам
                 file_tracks = {}
                 for track in tracks:
                     file_name = track.get("file")
@@ -115,111 +108,100 @@ class ScannerService:
         return cue_data
 
     def _collect_files(self, directory: Path, cue_data: dict[Path, list[dict]]) -> list[Path]:
-        """Собирает все аудиофайлы, исключая те, что уже попали в мультитреки."""
+        """Собирает все аудиофайлы, строго фильтруя директории-обманки."""
         files = []
         for audio_file in directory.rglob("*"):
-            if audio_file.suffix.upper().lstrip(".") in self.AUDIO_EXTENSIONS:
+            if audio_file.is_file() and audio_file.suffix.upper().lstrip(".") in self.AUDIO_EXTENSIONS:
                 if audio_file in cue_data:
-                    continue  # Пропускаем, так как файл пойдет как мультитрек
+                    continue
                 files.append(audio_file)
         return files
 
-    def scan_directory(self, directory: Path) -> dict[Path, list[Track]]:
+    def scan_directory(self, directory: Path) -> list[dict]:
         """
-        Главный оркестратор.
-        Раздает задачи в ProcessPool, агрегирует результаты и собирает ORM кэш.
+        Главный I/O оркестратор.
+        ВОЗВРАЩАЕТ: Список плоских словарей (DTO) для помещения в Staging Area (ОЗУ).
+        БАЗА ДАННЫХ ЗДЕСЬ НЕ ИСПОЛЬЗУЕТСЯ.
         """
-        self.logger.info(f"Начало сканирования: {directory}")
+        self.logger.info(f"Начало I/O сканирования: {directory}")
 
-        # 1. Инвентаризация
         cue_data = self._collect_cue(directory)
         single_files = self._collect_files(directory, cue_data)
 
-        total_tasks = len(cue_data) + len(single_files)
-        self.logger.info(f"Найдено: {len(single_files)} одиночных файлов, {len(cue_data)} мультитреков (Всего задач: {total_tasks})")
+        # Вычисляем бизнес-метрики (Файлы vs Треки)
+        total_files = len(cue_data) + len(single_files)
+        total_tracks = len(single_files) + sum(len(tracks) for tracks in cue_data.values())
 
-        if total_tasks == 0:
-            return {}
+        self.logger.info(f"Найдено: {len(single_files)} синглов, {len(cue_data)} мультитреков (Файлов: {total_files}, Треков: {total_tracks})")
 
-        results: dict[Path, list[Track]] = {}
+        if total_files == 0:
+            return []
+
+        staged_dtos: list[dict] = []
         processed_files = 0
         processed_tracks = 0
 
-        # 2. Выполнение в пуле процессов (ProcessPoolExecutor для обхода GIL)
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+        # Возвращаем ThreadPoolExecutor для максимального I/O Throughput
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
 
-            # Запускаем мультитреки
-            for file_path, tracks_data in cue_data.items():
-                if file_path.exists():
-                    futures.append(executor.submit(_worker_process_file, file_path, tracks_data))
-
-            # Запускаем синглы
+            # Постановка задач
             for file_path in single_files:
-                futures.append(executor.submit(_worker_process_file, file_path, None))
+                futures.append(executor.submit(self._worker_extract_tags, file_path, False))
 
-            # 3. Асинхронный сбор результатов в главном потоке
+            for file_path in cue_data.keys():
+                if file_path.exists():
+                    futures.append(executor.submit(self._worker_extract_tags, file_path, True))
+
+            # Сбор DTO
             for future in as_completed(futures):
                 if self.stop_event.is_set():
-                    self.logger.info("⏹ Сканирование прервано пользователем. Очистка пула...")
-                    for f in futures:
-                        f.cancel()
+                    self.logger.info("⏹ I/O Сканирование прервано пользователем.")
                     break
 
                 try:
-                    file_path, audio_data, track_list, status = future.result()
+                    file_path, metadata, status = future.result()
                     processed_files += 1
 
-                    if status != "ok":
-                        self.logger.warning(f"Файл {file_path.name} пропущен: {status}")
-                        self._report_progress(processed_files, total_tasks, processed_tracks)
-                        continue
+                    if status == "ok" and metadata:
+                        # Временно сохраняем оригинальный track_data для CUE
+                        if metadata.get("_is_multi"):
+                            tracks_in_cue = cue_data.get(file_path, [])
+                            metadata["_cue_tracks"] = tracks_in_cue
+                            processed_tracks += len(tracks_in_cue)
+                        else:
+                            processed_tracks += 1
 
-                    # 4. Сборка ORM-объектов в главном потоке (сохраняем консистентность кэша)
-                    if track_list is not None:
-                        # Мультитрек (уже предсобран в DTO словари воркером)
-                        # В данной архитектуре мы просто конвертируем словари обратно в объекты
-                        # TODO: Проработать загрузку мультитреков в кэш более элегантно
-                        audio_obj = AudioFile.from_dict(audio_data)
-                        track_objs = [Track.from_dict(t) for t in track_list]
-                        for t in track_objs:
-                            t.audiofile = audio_obj
-
-                        results[file_path] = track_objs
-                        processed_tracks += len(track_objs)
+                        staged_dtos.append(metadata)
                     else:
-                        # Сингл файл (сырые метаданные пришли из воркера)
-                        models_found = audio_data.pop("_models_found", ["Track", "AudioFile", "Album", "Artist", "Genre"])
-
-                        audio_obj, track_objs = self.obj_factory.create_objects(file_path, audio_data, models_found)
-                        results[file_path] = track_objs
-                        processed_tracks += len(track_objs)
+                        self.logger.warning(f"Файл {file_path.name} пропущен: {status}")
 
                 except Exception as e:
-                    self.logger.error(f"Сбой при обработке future результата: {e}")
+                    self.logger.error(f"Сбой future в I/O потоке: {e}", exc_info=True)
 
-                self._report_progress(processed_files, total_tasks, processed_tracks)
+                self._report_progress(processed_files, total_files, processed_tracks, total_tracks)
 
-        self.logger.info(f"✅ Сканирование завершено. Обработано {processed_files} файлов, сгенерировано {processed_tracks} треков.")
+        self.logger.info(f"✅ I/O Сканирование завершено. Подготовлено DTO: {len(staged_dtos)}")
 
+        # Отдаем плоские данные в ViewModel (Staging Area)
         if self.completion_callback and not self.stop_event.is_set():
-            # Формируем плоский список треков для UI
-            flat_tracks = [track for track_list in results.values() for track in track_list]
-            self.completion_callback(flat_tracks)
+            self.completion_callback(staged_dtos)
 
-        return results
+        return staged_dtos
 
-    def _report_progress(self, current: int, total: int, total_tracks: int) -> None:
-        """Отправка прогресса без блокирующих мьютексов."""
+    def _report_progress(self, current_files: int, total_files: int, current_tracks: int, total_tracks: int) -> None:
+        """Потокобезопасная отправка прогресса I/O операций с метриками треков."""
         if self.progress_callback:
             try:
-                progress = (current / total) if total > 0 else 0
+                progress = (current_files / total_files) if total_files > 0 else 0
                 self.progress_callback(
                     {
-                        "processed_files": current,
-                        "total_files": total,
-                        "processed_tracks": total_tracks,
+                        "processed_files": current_files,
+                        "total_files": total_files,
+                        "processed_tracks": current_tracks,
+                        "total_tracks": total_tracks,
                         "progress": progress,
+                        "stage": "I/O Ingestion",
                     }
                 )
             except Exception as e:
